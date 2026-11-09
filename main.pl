@@ -6,7 +6,17 @@
 :-dynamic energia/1.
 :-dynamic pontuacao/1.
 
-:-consult('mapa.pl').
+%mapa real (carregado por carrega_mapa/1) e controle de partida
+:-dynamic tile/3.
+:-dynamic map_size/2.
+:-dynamic mapa_atual/1.
+:-dynamic diretorio_base/1.
+:-dynamic ouros_coletados/1.
+:-dynamic acoes_executadas/1.
+:-dynamic fim_de_jogo/1.
+
+%arquivos de mapa sem caminho absoluto são procurados na pasta deste arquivo
+:- prolog_load_context(directory, D), retractall(diretorio_base(_)), assert(diretorio_base(D)).
 
 delete([], _, []).
 delete([Elem|Tail], Del, Result) :-
@@ -24,12 +34,90 @@ reset_game :- retractall(memory(_,_,_)),
 			retractall(energia(_)),
 			retractall(pontuacao(_)),
 			retractall(posicao(_,_,_)),
+			retractall(ouros_coletados(_)),
+			retractall(acoes_executadas(_)),
+			retractall(fim_de_jogo(_)),
 			assert(energia(100)),
 			assert(pontuacao(0)),
+			assert(ouros_coletados(0)),
+			assert(acoes_executadas(0)),
 			assert(posicao(1,1, norte)).
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Carregamento de mapas
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-:-reset_game.
+%carrega_mapa(+Arquivo): troca o mapa real e começa uma partida nova.
+%Lê só os fatos tile/3 e map_size/2 do arquivo (não usa consult), para
+%poder trocar de mapa várias vezes sem conflito entre arquivos.
+carrega_mapa(Arquivo) :-
+	diretorio_base(D),
+	absolute_file_name(Arquivo, Caminho, [relative_to(D), extensions(['', pl]), access(read)]),
+	retractall(tile(_,_,_)),
+	retractall(map_size(_,_)),
+	setup_call_cleanup(open(Caminho, read, S), le_termos_mapa(S), close(S)),
+	map_size(_,_),
+	retractall(mapa_atual(_)),
+	assert(mapa_atual(Caminho)),
+	novo_jogo, !.
+
+le_termos_mapa(S) :- read_term(S, T, []),
+	( T == end_of_file -> true ; guarda_termo_mapa(T), le_termos_mapa(S) ).
+
+guarda_termo_mapa(tile(X,Y,Z)) :- !, assertz(tile(X,Y,Z)).
+guarda_termo_mapa(map_size(X,Y)) :- !, assertz(map_size(X,Y)).
+guarda_termo_mapa(_).
+
+%reinicia a partida no mesmo mapa (recarrega o arquivo, pois pegar/0 remove ouro e itens do mapa)
+reinicia_jogo :- mapa_atual(A), carrega_mapa(A).
+
+%zera o agente e faz a primeira leitura dos sensores em [1,1]
+novo_jogo :- reset_game, atualiza_obs.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Execução de ações e fim de partida
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%executa(+Acao): ponto único de entrada para qualquer ação (autoplay, teclado ou testes).
+%Executa a ação, conta ações e ouros, e depois processa percepções e efeitos da nova posição.
+%Falha se a partida já acabou ou se a ação não pôde ser feita (ex.: andar contra a parede).
+executa(_) :- jogo_encerrado(_), !, fail.
+executa(sair) :- !, sair.
+executa(parar) :- !, parar.
+executa(Acao) :- acao_basica(Acao), !,
+	(brilho_aqui -> TinhaOuro = sim ; TinhaOuro = nao),
+	call(Acao),
+	incrementa_acoes,
+	((Acao == pegar, TinhaOuro == sim, \+ brilho_aqui) -> incrementa_ouros ; true),
+	atualiza_obs, verifica_player.
+
+acao_basica(andar).
+acao_basica(virar_direita).
+acao_basica(virar_esquerda).
+acao_basica(pegar).
+
+%o agente percebe brilho na posição atual (pela própria memória, não pelo mapa real)
+brilho_aqui :- posicao(X,Y,_), memory(X,Y,L), member(brilho, L).
+
+incrementa_acoes :- retract(acoes_executadas(N)), N1 is N + 1, assert(acoes_executadas(N1)).
+incrementa_ouros :- retract(ouros_coletados(N)), N1 is N + 1, assert(ouros_coletados(N1)).
+
+%sair: encerra a partida com sucesso; só é possível na origem [1,1]
+sair :- \+ jogo_encerrado(_), posicao(1,1,_), assert(fim_de_jogo(saiu)).
+
+%parar: o agente desiste e encerra a partida onde estiver (sem ação segura ou útil)
+parar :- \+ jogo_encerrado(_), assert(fim_de_jogo(parou)).
+
+%jogo_encerrado(-Motivo): saiu | parou | morreu
+jogo_encerrado(M) :- fim_de_jogo(M), !.
+jogo_encerrado(morreu) :- posicao(_,_,morto).
+
+%resumo da partida para registro de testes
+resultado(Mapa, Pontuacao, Ouros, Sobreviveu, Acoes, Motivo) :-
+	mapa_atual(Caminho), file_base_name(Caminho, Mapa),
+	pontuacao(Pontuacao), ouros_coletados(Ouros), acoes_executadas(Acoes),
+	(posicao(_,_,morto) -> Sobreviveu = nao ; Sobreviveu = sim),
+	(jogo_encerrado(M) -> Motivo = M ; Motivo = em_andamento).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Controle de Status
@@ -250,6 +338,11 @@ executa_acao(X) :- L=['virar_esquerda','virar_direita','andar','pegar'],random_b
 %executa_acao(andar) :- posicao(PX, _, leste), PX < 3, X = andar,!.
 %executa_acao(pegar) :- posicao(PX, PY,_), tem_ouro(PX, PY), !.
 %executa_acao(voltar) :- peguei_todos_ouros,!.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%mapa padrão; carrega_mapa/1 troca por outro (ex.: carrega_mapa('mapa-dificil.pl'))
+:- initialization(carrega_mapa('mapa.pl')).
 
 
 

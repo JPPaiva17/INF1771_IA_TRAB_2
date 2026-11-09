@@ -3,8 +3,15 @@ import pygame
 import sys, time, random
 from pyswip import Prolog, Functor, Variable, Query
 
+import os
 import pathlib
-current_path = str(pathlib.Path().resolve())
+
+# roda a partir da pasta do projeto (imagens e main.pl são caminhos relativos)
+current_path = pathlib.Path(__file__).resolve().parent
+os.chdir(current_path)
+
+# mapa escolhido pela linha de comando: python gmap.py mapa-dificil.pl
+mapa_arquivo = sys.argv[1] if len(sys.argv) > 1 else 'mapa.pl'
 
 elapsed_time = 0
 auto_play_tempo = 0.5
@@ -16,10 +23,15 @@ size_x = 12
 size_y = 12
 width = size_x * scale  #Largura Janela
 height = size_y * scale #Altura Janela
+status_height = 60      #Altura da barra de status (2 linhas)
 
 player_pos = (1,1,'norte')
 energia = 0
 pontuacao = 0
+ouros = 0
+acoes = 0
+encerrado = None      # None enquanto a partida roda; senão 'saiu', 'parou' ou 'morreu'
+resultado_impresso = False
 
 
 mapa=[['','','','','','','','','','','',''],
@@ -38,9 +50,22 @@ mapa=[['','','','','','','','','','','',''],
 visitados = []
 certezas = []
 
-pl_file = (current_path + '\\main.pl').replace('\\','/')
+def atomo_prolog(texto):
+    return "'" + str(texto).replace('\\', '/').replace("'", "\\'") + "'"
+
+pl_file = str(current_path / 'main.pl').replace('\\','/')
 prolog = Prolog()
 prolog.consult(pl_file)
+
+try:
+    mapa_ok = list(prolog.query("carrega_mapa(" + atomo_prolog(mapa_arquivo) + ")"))
+except Exception as erro:
+    mapa_ok = []
+    print(erro)
+if not mapa_ok:
+    print("Não foi possível carregar o mapa: " + mapa_arquivo, file=sys.stderr)
+    sys.exit(1)
+print("Mapa:", mapa_arquivo)
 
 last_action = ""
 
@@ -56,15 +81,29 @@ def decisao():
 
 
 def exec_prolog(a):
+    # executa/1 (main.pl) roda a ação e já processa percepções e efeitos da nova posição
     global last_action
     if a != "":
-        list(prolog.query(a))
+        list(prolog.query("executa(" + str(a) + ")"))
     last_action = a
 
-def update_prolog():
-    global player_pos, mapa, energia, pontuacao,visitados, show_map
+def reinicia():
+    global last_action, resultado_impresso
+    list(prolog.query("reinicia_jogo"))
+    last_action = ""
+    resultado_impresso = False
 
-    list(prolog.query("atualiza_obs, verifica_player"))
+def imprime_resultado():
+    # registro da partida para os testes (mapa, pontuação, ouro, sobrevivência, ações)
+    r = list(prolog.query("resultado(M, P, O, S, A, Motivo)"))
+    if r:
+        r = r[0]
+        print("RESULTADO mapa=%s pontuacao=%s ouros=%s sobreviveu=%s acoes=%s motivo=%s"
+              % (r['M'], r['P'], r['O'], r['S'], r['A'], r['Motivo']), flush=True)
+
+def update_prolog():
+    # só lê o estado do Prolog; não altera o jogo
+    global player_pos, mapa, energia, pontuacao,visitados, show_map, ouros, acoes, encerrado
 
     x = Variable()
     y = Variable()
@@ -148,6 +187,11 @@ def update_prolog():
     pontuacao_query.nextSolution()
     pontuacao = x.value
     pontuacao_query.closeQuery()
+
+    ouros = list(prolog.query("ouros_coletados(N)"))[0]['N']
+    acoes = list(prolog.query("acoes_executadas(N)"))[0]['N']
+    fim = list(prolog.query("jogo_encerrado(M)"))
+    encerrado = str(fim[0]['M']) if fim else None
 
     #print(mapa)
     #print(player_pos)
@@ -254,27 +298,31 @@ def load():
 
 def update(dt, screen):
     
-    global elapsed_time
-    
+    global elapsed_time, resultado_impresso
+
     elapsed_time += dt
-    
+
     if (elapsed_time / 1000) > auto_play_tempo:
-        
-        if auto_play and player_pos[2] != 'morto':
+
+        if auto_play and encerrado is None:
             exec_prolog(decisao())
             update_prolog()
-       
+
         elapsed_time = 0
-        
-    
+
+    if encerrado is not None and not resultado_impresso:
+        imprime_resultado()
+        resultado_impresso = True
+
+
 
 def key_pressed(event):
-    
+
     global show_map
     #leitura do teclado
     if event.type == pygame.KEYDOWN:
-        
-        if not auto_play and player_pos[2] != 'morto':
+
+        if not auto_play and encerrado is None:
             if event.key == pygame.K_LEFT: #tecla esquerda
                 exec_prolog("virar_esquerda")
                 update_prolog()
@@ -290,7 +338,15 @@ def key_pressed(event):
             if event.key == pygame.K_SPACE:
                 exec_prolog("pegar")
                 update_prolog()
-    
+
+            elif event.key == pygame.K_s: #sair (só funciona em [1,1])
+                exec_prolog("sair")
+                update_prolog()
+
+        if event.key == pygame.K_r: #reinicia a partida no mesmo mapa
+            reinicia()
+            update_prolog()
+
         if event.key == pygame.K_m:
             show_map = not show_map
             update_prolog()
@@ -369,6 +425,16 @@ def draw_screen(screen):
     t = sys_font.render("Energia: " + str(energia), False, (255,255,255))
     screen.blit(t, t.get_rect(top = height + 5, left=width-140))
 
+    t = sys_font.render("Ouros: " + str(ouros), False, (255,255,255))
+    screen.blit(t, t.get_rect(top = height + 33, left=40))
+
+    t = sys_font.render("Ações: " + str(acoes), False, (255,255,255))
+    screen.blit(t, t.get_rect(top = height + 33, left=width/2-40))
+
+    if encerrado is not None:
+        t = sys_font.render("FIM: " + encerrado, False, (255,200,0))
+        screen.blit(t, t.get_rect(top = height + 33, left=width-140))
+
 def main_loop(screen):  
     global clock
     running = True
@@ -400,7 +466,7 @@ update_prolog()
 
 pygame.init()
 pygame.display.set_caption('INF1771 Trabalho 2 - Agente Lógico')
-screen = pygame.display.set_mode((width, height+30))
+screen = pygame.display.set_mode((width, height+status_height))
 load()
 
 main_loop(screen)
