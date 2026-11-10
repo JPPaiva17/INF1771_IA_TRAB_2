@@ -15,6 +15,11 @@
 :-dynamic acoes_executadas/1.
 :-dynamic fim_de_jogo/1.
 
+%base de conhecimento do agente (ver seção "Base de conhecimento do agente")
+:-dynamic percepcao/3.
+:-dynamic pisou/2.
+:-dynamic perigo_confirmado/3.
+
 %arquivos de mapa sem caminho absoluto são procurados na pasta deste arquivo
 :- prolog_load_context(directory, D), retractall(diretorio_base(_)), assert(diretorio_base(D)).
 
@@ -37,6 +42,9 @@ reset_game :- retractall(memory(_,_,_)),
 			retractall(ouros_coletados(_)),
 			retractall(acoes_executadas(_)),
 			retractall(fim_de_jogo(_)),
+			retractall(percepcao(_,_,_)),
+			retractall(pisou(_,_)),
+			retractall(perigo_confirmado(_,_,_)),
 			assert(energia(100)),
 			assert(pontuacao(0)),
 			assert(ouros_coletados(0)),
@@ -72,7 +80,7 @@ guarda_termo_mapa(_).
 reinicia_jogo :- mapa_atual(A), carrega_mapa(A).
 
 %zera o agente e faz a primeira leitura dos sensores em [1,1]
-novo_jogo :- reset_game, atualiza_obs.
+novo_jogo :- reset_game, set_real(1,1), atualiza_obs.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Execução de ações e fim de partida
@@ -97,7 +105,7 @@ acao_basica(virar_esquerda).
 acao_basica(pegar).
 
 %o agente percebe brilho na posição atual (pela própria memória, não pelo mapa real)
-brilho_aqui :- posicao(X,Y,_), memory(X,Y,L), member(brilho, L).
+brilho_aqui :- posicao(X,Y,_), memory(X,Y,L), memberchk(brilho, L), !.
 
 incrementa_acoes :- retract(acoes_executadas(N)), N1 is N + 1, assert(acoes_executadas(N1)).
 incrementa_ouros :- retract(ouros_coletados(N)), N1 is N + 1, assert(ouros_coletados(N1)).
@@ -140,7 +148,7 @@ verifica_player :- posicao(X,Y,_), tile(X,Y,'D'), random_between(-80,-50,D), atu
 verifica_player :- posicao(X,Y,_), tile(X,Y,'d'), random_between(-50,-25,D), atualiza_energia(D),!.
 verifica_player :- posicao(X,Y,Z), tile(X,Y,'T'), 
 					map_size(SX,SY), random_between(1,SX,NX), random_between(1,SY,NY),
-				retract(posicao(X,Y,Z)), assert(posicao(NX,NY,Z)), atualiza_obs, verifica_player,!.
+				retract(posicao(X,Y,Z)), assert(posicao(NX,NY,Z)), set_real(NX,NY), atualiza_obs, verifica_player,!.
 verifica_player :- true.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -216,53 +224,108 @@ observacao_adj(passos,L) :- member('d',L).
 %% Tratamento de KB e observações
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-%consulta e processa observações
-atualiza_obs:-adj_cand_obs(LP), observacoes(LO), iter_pos_list(LP,LO), observacao_certeza, observacao_vazia.
-
-%adjacencias candidatas p/ a observacao (aquelas não visitadas)
-adj_cand_obs(L) :- findall((X,Y), (adjacente(X, Y), \+visitado(X,Y)), L).
-
-%cria lista de observacoes
+%cria lista de observacoes (sensores: leem o mapa real ao redor da posição atual)
 observacoes(X) :- adjacentes(L), findall(Y, observacao_adj(Y,L), X).
 
-%itera posicoes da lista para adicionar observacoes
-iter_pos_list([], _) :- !.
-iter_pos_list([H|T], LO) :- H=(X,Y), 
-							((corrige_observacoes_antigas(X, Y, LO),!);
-							adiciona_observacoes(X, Y, LO)),
-							iter_pos_list(T, LO).							 
+%consulta e processa observações: guarda o que foi percebido aqui e refaz as inferências
+%(substitui a versão original, cuja dedução de "única casa candidata" podia marcar
+% um perigo como certo sem que ele fosse o único possível)
+atualiza_obs :- registra_percepcao, infere.
 
-%Corrige observacoes antigas na memoria que ficaram com apenas uma adjacencia
-corrige_observacoes_antigas(X, Y, []):- \+certeza(X,Y), memory(X,Y,[]).
-corrige_observacoes_antigas(X, Y, LO):-
-	\+certeza(X,Y), \+ memory(X,Y,[]), memory(X, Y, LM), intersection(LO, LM, L), 
-	retract(memory(X, Y, LM)), assert(memory(X, Y, L)).
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Base de conhecimento do agente
+%%
+%% Fatos que o agente acumula (nenhum deles é o mapa real):
+%%   percepcao(X,Y,L)          sinais sentidos em (X,Y): lista de brisa/palmas/passos
+%%   pisou(X,Y)                o agente esteve fisicamente em (X,Y) e sabe o que há ali
+%%   visitado(X,Y)             casa de onde o agente saiu andando
+%%   perigo_confirmado(X,Y,P)  perigo P (poco/teleporte/inimigo) provado em (X,Y)
+%% Derivados para a interface: memory/3 e certeza/2.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-%Adiciona observacoes na memoria
-adiciona_observacoes(X, Y, _) :- certeza(X,Y),!.
-adiciona_observacoes(X, Y, LO) :- \+certeza(X,Y), \+ memory(X,Y,_), assert(memory(X, Y, LO)).
+%perigo e o sinal que ele provoca nas casas vizinhas
+sinal(poco, brisa).
+sinal(teleporte, palmas).
+sinal(inimigo, passos).
 
-%Quando há apenas uma observação e uma unica posição incerta, deduz que a observação está na casa incerta
-%e marca como certeza
-%observacao_certeza:- findall((X,Y), (adjacente(X, Y), 
-%						((\+visitado(X,Y), \+certeza(X,Y));(certeza(X,Y),memory(X,Y,ZZ),ZZ\=[])),
-%						memory(X,Y,Z), Z\=[]), L), ((length(L,1),L=[(XX,YY)], assert(certeza(XX,YY)),!);true).
-						
-observacao_certeza:- observacao_certeza('brisa'),
-						observacao_certeza('palmas'),
-						observacao_certeza('passos').
-						
-observacao_certeza(Z):- findall((X,Y), (adjacente(X, Y), 
-						((\+visitado(X,Y), \+certeza(X,Y));(certeza(X,Y),memory(X,Y,[Z]))),
-						memory(X,Y,[Z])), L), ((length(L,1),L=[(XX,YY)], assert(certeza(XX,YY)),!);true).						
+perigo(P) :- sinal(P, _).
 
-%Quando posição não tem observações
-observacao_vazia:- adj_cand_obs(LP), observacao_vazia(LP).
-observacao_vazia([]) :- !.
-observacao_vazia([H|T]) :- H=(X,Y), ((memory(X,Y,[]), \+certeza(X,Y),assert(certeza(X,Y)),!);true), observacao_vazia(T).
+dentro_mapa(X,Y) :- map_size(MX,MY), between(1,MX,X), between(1,MY,Y).
+
+%vizinha(+X,+Y,-VX,-VY): as 4 casas vizinhas dentro do mapa
+vizinha(X,Y,VX,Y) :- VX is X + 1, map_size(MX,_), VX =< MX.
+vizinha(X,Y,VX,Y) :- VX is X - 1, VX >= 1.
+vizinha(X,Y,X,VY) :- VY is Y + 1, map_size(_,MY), VY =< MY.
+vizinha(X,Y,X,VY) :- VY is Y - 1, VY >= 1.
+
+%guarda a percepção da posição atual
+registra_percepcao :- posicao(X,Y,_), observacoes(L0), sort(L0, L),
+	retractall(percepcao(X,Y,_)), assert(percepcao(X,Y,L)).
+
+%casa já percorrida pelo agente (a posição atual também conta)
+visitada(X,Y) :- visitado(X,Y).
+visitada(X,Y) :- posicao(X,Y,D), D \= morto, \+ visitado(X,Y).
+
+%sem_perigo(X,Y,P): o agente sabe que (X,Y) não contém o perigo P
+% 1) esteve lá e não encontrou P
+sem_perigo(X,Y,P) :- pisou(X,Y), !, sinal(P,S), \+ (memory(X,Y,L), member(S,L)).
+% 2) alguma vizinha foi percebida sem o sinal de P
+sem_perigo(X,Y,P) :- sinal(P,S), vizinha(X,Y,VX,VY), percepcao(VX,VY,L), \+ member(S,L), !.
+% 3) já foi provado outro perigo ali (cada casa tem um único elemento)
+sem_perigo(X,Y,P) :- perigo_confirmado(X,Y,P2), P2 \= P, !.
+
+%pode_ter(X,Y,P): nada do que o agente sabe exclui o perigo P em (X,Y)
+pode_ter(X,Y,P) :- perigo(P), \+ sem_perigo(X,Y,P).
+
+%a casa tem ao menos uma vizinha já percebida (há alguma informação sobre ela)
+informada(X,Y) :- pisou(X,Y), !.
+informada(X,Y) :- vizinha(X,Y,VX,VY), percepcao(VX,VY,_), !.
+
+%%% Consultas usadas pela decisão (fase 3/4) %%%
+
+%segura: nenhum perigo é possível em (X,Y)
+segura(X,Y) :- dentro_mapa(X,Y), informada(X,Y), \+ pode_ter(X,Y,_).
+
+%perigo_possivel: P não está excluído nem provado em (X,Y)
+perigo_possivel(X,Y,P) :- dentro_mapa(X,Y), \+ perigo_confirmado(X,Y,_), pode_ter(X,Y,P).
+
+%desconhecida: o agente não tem nenhuma informação sobre (X,Y)
+desconhecida(X,Y) :- dentro_mapa(X,Y), \+ informada(X,Y).
+
+%fronteira: casa segura onde o agente ainda não esteve
+fronteira(X,Y) :- segura(X,Y), \+ visitada(X,Y), \+ pisou(X,Y).
+
+%%% Inferência %%%
+
+%novo_perigo(X,Y,P): perigo P provado em (X,Y) e ainda não registrado
+% 1) o agente esteve lá e encontrou P (teleporte que o levou, inimigo que o atacou, poço)
+novo_perigo(X,Y,P) :- pisou(X,Y), memory(X,Y,L), sinal(P,S), member(S,L),
+	\+ perigo_confirmado(X,Y,P).
+% 2) uma casa percebeu o sinal de P e só uma vizinha dela ainda pode ter P
+novo_perigo(X,Y,P) :- percepcao(VX,VY,L), sinal(P,S), member(S,L),
+	findall((NX,NY), (vizinha(VX,VY,NX,NY), pode_ter(NX,NY,P)), [(X,Y)]),
+	\+ perigo_confirmado(X,Y,P).
+
+%aplica as regras até não haver nada novo (cada prova pode excluir outros perigos e gerar novas provas)
+infere :- novo_perigo(X,Y,P), !, assert(perigo_confirmado(X,Y,P)), infere.
+infere :- sincroniza_memoria.
+
+%reescreve memory/3 e certeza/2 das casas onde o agente não esteve, para a interface e o show_mem:
+%memory = sinais dos perigos ainda possíveis; certeza = casa segura ou perigo provado
+sincroniza_memoria :-
+	forall(( dentro_mapa(X,Y), \+ pisou(X,Y) ), sincroniza_casa(X,Y)).
+
+sincroniza_casa(X,Y) :-
+	retractall(memory(X,Y,_)), retractall(certeza(X,Y)),
+	( informada(X,Y) ->
+		findall(S, (pode_ter(X,Y,P), sinal(P,S)), L),
+		assert(memory(X,Y,L)),
+		( (L == [] ; perigo_confirmado(X,Y,_)) -> assert(certeza(X,Y)) ; true )
+	; true ).
 
 %Quando posicao é visitada, atualiza memoria de posicao com a informação real do mapa 
-set_real(X,Y):- ((retract(certeza(X,Y)), assert(certeza(X,Y)),!); assert(certeza(X,Y))), set_real2(X,Y),!.
+set_real(X,Y):- ((retract(certeza(X,Y)), assert(certeza(X,Y)),!); assert(certeza(X,Y))), set_real2(X,Y),
+				((pisou(X,Y),!); assert(pisou(X,Y))),!.
 set_real2(X,Y):- tile(X,Y,'P'), ((retract(memory(X,Y,_)),assert(memory(X,Y,[brisa])),!);assert(memory(X,Y,[brisa]))),!.
 set_real2(X,Y):- tile(X,Y,'O'), ((retract(memory(X,Y,_)),assert(memory(X,Y,[brilho])),!);assert(memory(X,Y,[brilho]))),!.
 set_real2(X,Y):- tile(X,Y,'T'), ((retract(memory(X,Y,_)),assert(memory(X,Y,[palmas])),!);assert(memory(X,Y,[palmas]))),!.
