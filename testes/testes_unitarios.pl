@@ -99,3 +99,92 @@ test(reinicia_apaga_kb) :-
 	reinicia_jogo, \+ percepcao(1,2,_), \+ pisou(1,2), \+ perigo_confirmado(_,_,_).
 
 :- end_tests(fase2).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Fase 3: planejamento de rotas
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% só para teste: o agente "sente" todas as casas sem sair do lugar (conhece o mapa inteiro)
+conhece_mapa :-
+	posicao(X0,Y0,D0),
+	forall(dentro_mapa(X,Y), (coloca(X,Y,D0), registra_percepcao)),
+	coloca(X0,Y0,D0), infere.
+
+% aplica as ações a partir de um estado, sem executar no jogo
+simula(E, [], E).
+simula(E, [A|R], F) :- once(efeito(E, A, E1)), simula(E1, R, F).
+
+passa_por(Acoes, E0, X, Y) :- append(P, _, Acoes), simula(E0, P, e(X,Y,_)), !.
+
+% assert fora da unidade de teste (dentro dela iria para o módulo do plunit)
+define_plano(Acoes, E) :- assert(plano(Acoes, E)).
+
+:- begin_tests(fase3).
+
+% caminho direto passaria pelo poço (1,3): a rota contorna por (2,2)
+test(rota_desvia_do_poco) :-
+	carrega_mapa('testes/mapa_teste_poco.pl'), conhece_mapa, coloca(1,2,norte),
+	rota_ate([(2,3)], A),
+	A == [virar_direita, andar, virar_esquerda, andar],
+	\+ passa_por(A, e(1,2,norte), 1, 3).
+
+% viradas custam como andar: de costas para o alvo são 2 viradas + 1 passo;
+% até (3,3) o caminho reto pelo norte cruza o poço (1,3), então são 6 ações pelo leste
+test(conta_viradas) :-
+	carrega_mapa('testes/mapa_teste_poco.pl'), conhece_mapa,
+	coloca(1,1,sul), custo_rota([(1,2)], 3),
+	coloca(1,1,norte), custo_rota([(3,1)], 3),
+	rota_ate([(3,3)], A), length(A, 6), simula(e(1,1,norte), A, e(3,3,_)),
+	\+ passa_por(A, e(1,1,norte), 1, 3).
+
+% o alvo mais próximo (em ações) é o escolhido entre vários
+test(alvo_mais_proximo) :-
+	carrega_mapa('testes/mapa_teste_poco.pl'), conhece_mapa, coloca(1,1,norte),
+	rota_ate([(3,3), (1,2), (3,1)], [andar]).
+
+% não atravessa casas sem informação
+test(sem_rota_por_desconhecido) :-
+	carrega_mapa('testes/mapa_teste_poco.pl'),
+	\+ rota_ate([(3,3)], _).
+
+% a casa-alvo pode ser arriscada, mas o caminho até ela não
+test(alvo_arriscado_permitido) :-
+	carrega_mapa('testes/mapa_teste_poco.pl'), executa(andar),
+	\+ segura(1,3), rota_ate([(1,3)], [andar]),
+	\+ rota_ate([(2,3)], _).
+
+% já está no alvo: rota vazia
+test(ja_no_alvo) :-
+	carrega_mapa('testes/mapa_teste_poco.pl'), rota_ate([(1,1)], []).
+
+% na casa de um inimigo (não segura) o agente ainda consegue girar e sair
+test(sai_da_casa_do_inimigo) :-
+	carrega_mapa('testes/mapa_teste_cadeia.pl'),
+	anda([andar, andar, virar_direita, andar]), posicao(2,3,leste),
+	once(rota_ate([(1,1)], A)), simula(e(2,3,leste), A, e(1,1,_)).
+
+% plano executado até o fim: chega ao alvo e o plano some
+test(plano_executa_ate_o_fim) :-
+	carrega_mapa('testes/mapa_teste_poco.pl'), conhece_mapa,
+	planeja([(3,3)]), tem_plano, executa_plano,
+	posicao(3,3,_), \+ tem_plano, acoes_executadas(6), pontuacao(-6).
+
+% ação diferente da planejada descarta o plano
+test(plano_cancelado_por_desvio) :-
+	carrega_mapa('testes/mapa_teste_poco.pl'), conhece_mapa,
+	planeja([(3,3)]), executa(pegar), \+ tem_plano.
+
+% agente fora do estado esperado: a próxima ação do plano não é usada
+test(plano_cancelado_fora_do_lugar) :-
+	carrega_mapa('testes/mapa_teste_poco.pl'), conhece_mapa,
+	planeja([(3,3)]), coloca(2,2,sul),
+	\+ proxima_acao_plano(_), \+ tem_plano.
+
+% teletransporte no meio do plano descarta o resto
+test(plano_cancelado_por_teleporte, [forall(between(1, 10, _))]) :-
+	carrega_mapa('testes/mapa_teste_teleporte.pl'),
+	define_plano([virar_direita, andar, andar], e(1,1,norte)),
+	executa(virar_direita), user:plano([andar, andar], e(1,1,leste)),
+	executa(andar), \+ tem_plano.
+
+:- end_tests(fase3).

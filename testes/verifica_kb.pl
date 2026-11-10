@@ -17,11 +17,11 @@ main :-
 	( nb_current(total_erros, E), E > 0 -> halt(1) ; halt(0) ).
 
 verifica_mapa(Mapa, N) :-
-	nb_setval(erros, 0), nb_setval(seguras, 0), nb_setval(confirmados, 0),
+	nb_setval(erros, 0), nb_setval(seguras, 0), nb_setval(confirmados, 0), nb_setval(rotas, 0),
 	forall(between(1, N, _), (carrega_mapa(Mapa), joga(300))),
-	nb_getval(erros, E), nb_getval(seguras, S), nb_getval(confirmados, C),
+	nb_getval(erros, E), nb_getval(seguras, S), nb_getval(confirmados, C), nb_getval(rotas, R),
 	( nb_current(total_erros, T0) -> true ; T0 = 0 ), T is T0 + E, nb_setval(total_erros, T),
-	format("~w: ~d partidas, ~d erros; ~d marcações de segura e ~d de perigo conferidas~n", [Mapa, N, E, S, C]).
+	format("~w: ~d partidas, ~d erros; ~d marcações de segura, ~d de perigo e ~d rotas conferidas~n", [Mapa, N, E, S, C, R]).
 
 joga(0) :- !.
 joga(_) :- jogo_encerrado(_), !.
@@ -43,7 +43,25 @@ confere :-
 	forall(( certeza(X, Y), memory(X, Y, L) ), confere_casa(X, Y, L)),
 	forall(segura(X, Y), ( perigo_real(X, Y) -> erro(X, Y, segura, 'segura/2 errado') ; true )),
 	forall(fronteira(X, Y), ( perigo_real(X, Y) -> erro(X, Y, fronteira, 'fronteira/2 errado') ; true )),
-	forall(perigo_confirmado(X, Y, P), ( sinal(P, S), tag_real(X, Y, S) -> true ; erro(X, Y, P, 'perigo_confirmado/3 errado') )).
+	forall(perigo_confirmado(X, Y, P), ( sinal(P, S), tag_real(X, Y, S) -> true ; erro(X, Y, P, 'perigo_confirmado/3 errado') )),
+	confere_rota.
+
+% a rota até a fronteira mais próxima só pode pisar em casas sem perigo real
+confere_rota :-
+	findall((X, Y), fronteira(X, Y), F),
+	( F \== [], estado_atual(E0), rota_ate(F, Acoes) ->
+		conta(rotas),
+		casas_da_rota(E0, Acoes, Casas),
+		forall(member((X, Y), Casas), ( perigo_real(X, Y) -> erro(X, Y, rota, 'rota pisa em perigo') ; true )),
+		last([(1,1)|Casas], Fim),
+		( memberchk(Fim, F) -> true ; Fim = (FX, FY), erro(FX, FY, rota, 'rota não termina na fronteira') )
+	; true ).
+
+casas_da_rota(_, [], []).
+casas_da_rota(E, [A|R], Casas) :-
+	once(efeito(E, A, E1)), E1 = e(X, Y, _),
+	( A == andar -> Casas = [(X, Y)|C] ; Casas = C ),
+	casas_da_rota(E1, R, C).
 
 confere_casa(X, Y, L) :-
 	exclude([T]>>member(T, [brilho, reflexo]), L, Perigos),

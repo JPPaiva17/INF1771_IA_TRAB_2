@@ -19,6 +19,7 @@
 :-dynamic percepcao/3.
 :-dynamic pisou/2.
 :-dynamic perigo_confirmado/3.
+:-dynamic plano/2.
 
 %arquivos de mapa sem caminho absoluto são procurados na pasta deste arquivo
 :- prolog_load_context(directory, D), retractall(diretorio_base(_)), assert(diretorio_base(D)).
@@ -45,6 +46,7 @@ reset_game :- retractall(memory(_,_,_)),
 			retractall(percepcao(_,_,_)),
 			retractall(pisou(_,_)),
 			retractall(perigo_confirmado(_,_,_)),
+			retractall(plano(_,_)),
 			assert(energia(100)),
 			assert(pontuacao(0)),
 			assert(ouros_coletados(0)),
@@ -97,7 +99,8 @@ executa(Acao) :- acao_basica(Acao), !,
 	call(Acao),
 	incrementa_acoes,
 	((Acao == pegar, TinhaOuro == sim, \+ brilho_aqui) -> incrementa_ouros ; true),
-	atualiza_obs, verifica_player.
+	atualiza_obs, verifica_player,
+	avanca_plano(Acao).
 
 acao_basica(andar).
 acao_basica(virar_direita).
@@ -322,6 +325,100 @@ sincroniza_casa(X,Y) :-
 		assert(memory(X,Y,L)),
 		( (L == [] ; perigo_confirmado(X,Y,_)) -> assert(certeza(X,Y)) ; true )
 	; true ).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Planejamento de rotas
+%%
+%% Busca em largura sobre estados (X, Y, Direção) usando só o que o agente sabe:
+%% passa apenas por casas seguras (segura/2). Virar e andar custam 1 ponto cada,
+%% então a rota com menos ações é também a de menor custo (conta as viradas).
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%direção à direita / à esquerda
+direita(norte, leste).
+direita(leste, sul).
+direita(sul, oeste).
+direita(oeste, norte).
+esquerda(D, E) :- direita(E, D).
+
+%casa à frente de (X,Y) olhando para D
+a_frente(X, Y, norte, X, Y1) :- Y1 is Y + 1, map_size(_, MY), Y1 =< MY.
+a_frente(X, Y, sul,   X, Y1) :- Y1 is Y - 1, Y1 >= 1.
+a_frente(X, Y, leste, X1, Y) :- X1 is X + 1, map_size(MX, _), X1 =< MX.
+a_frente(X, Y, oeste, X1, Y) :- X1 is X - 1, X1 >= 1.
+
+%efeito(+Estado, +Acao, -NovoEstado): resultado esperado de uma ação (sem surpresas)
+efeito(e(X,Y,D), virar_direita,  e(X,Y,D2)) :- direita(D, D2).
+efeito(e(X,Y,D), virar_esquerda, e(X,Y,D2)) :- esquerda(D, D2).
+efeito(e(X,Y,D), andar,          e(X2,Y2,D)) :- a_frente(X, Y, D, X2, Y2).
+efeito(e(X,Y,D), pegar,          e(X,Y,D)).
+
+estado_atual(e(X,Y,D)) :- posicao(X,Y,D), D \= morto.
+
+%rota_ate(+Alvos, -Acoes): menor sequência de ações da posição atual até qualquer casa de Alvos
+%(lista de (X,Y)). Só atravessa casas seguras; a casa-alvo em si pode não ser segura
+%(útil para arriscar uma casa de propósito). Falha se não houver caminho conhecido.
+rota_ate(Alvos, Acoes) :- estado_atual(E), rota_de(E, Alvos, Acoes).
+
+rota_de(e(X,Y,_), Alvos, []) :- memberchk((X,Y), Alvos), !.
+rota_de(E, Alvos, Acoes) :-
+	E = e(X0,Y0,_),
+	empty_assoc(V0), put_assoc(E, V0, t, V),
+	bfs([E-[]], V, Alvos, (X0,Y0), Rev), !,
+	reverse(Rev, Acoes).
+
+%bfs(+Camada, +Vistos, +Alvos, +Origem, -AcoesInvertidas): expande uma camada (mesmo custo) por vez
+bfs(Camada, Vistos, Alvos, Origem, Rev) :-
+	Camada \== [],
+	findall(E2-[A|R],
+	        ( member(E-R, Camada), efeito(E, A, E2), A \== pegar, transitavel(E2, Alvos, Origem) ),
+	        Candidatos),
+	( member(e(X,Y,_)-Rev, Candidatos), memberchk((X,Y), Alvos) -> true
+	; novos(Candidatos, Vistos, Proxima, Vistos2),
+	  bfs(Proxima, Vistos2, Alvos, Origem, Rev) ).
+
+%só pode entrar em casa segura ou na casa-alvo; na casa de origem pode girar mesmo que
+%ela não seja segura (ex.: o agente está na casa de um inimigo)
+transitavel(e(X,Y,_), Alvos, Origem) :-
+	( memberchk((X,Y), Alvos) -> true ; (X,Y) == Origem -> true ; segura(X,Y) ).
+
+%descarta estados já vistos (mantém o primeiro caminho encontrado para cada estado)
+novos([], V, [], V).
+novos([E-R|T], V0, Prox, V) :-
+	( get_assoc(E, V0, _) -> Prox = Prox1, V1 = V0
+	; put_assoc(E, V0, t, V1), Prox = [E-R|Prox1] ),
+	novos(T, V1, Prox1, V).
+
+%custo_rota(+Alvos, -Custo): número de ações (= pontos gastos) até o alvo mais próximo
+custo_rota(Alvos, Custo) :- rota_ate(Alvos, Acoes), length(Acoes, Custo).
+
+%%% Plano em andamento %%%
+%plano(Acoes, EstadoEsperado): ações que faltam e o estado em que o agente deve
+%estar antes da próxima. Se algo inesperado acontecer (teleporte, ação diferente da
+%planejada), o plano é descartado e a decisão planeja de novo.
+
+%planeja(+Alvos): calcula e guarda a rota até o alvo mais próximo
+planeja(Alvos) :- rota_ate(Alvos, Acoes), Acoes \== [], estado_atual(E),
+	retractall(plano(_,_)), assert(plano(Acoes, E)).
+
+%proxima_acao_plano(-A): próxima ação do plano, se o agente está onde o plano espera
+proxima_acao_plano(A) :- plano([A|_], E), estado_atual(E), !.
+proxima_acao_plano(_) :- retractall(plano(_,_)), fail.
+
+tem_plano :- plano(_,_).
+cancela_plano :- retractall(plano(_,_)).
+
+%avanca_plano(+Acao): chamado por executa/1 depois de cada ação
+avanca_plano(Acao) :-
+	( plano([Acao|Resto], E), efeito(E, Acao, Esperado) ->
+		retractall(plano(_,_)),
+		( Resto \== [], estado_atual(Esperado) -> assert(plano(Resto, Esperado)) ; true )
+	; retractall(plano(_,_)) ).
+
+%vai_para(+X,+Y): depuração no swipl — planeja e executa a rota inteira até (X,Y)
+vai_para(X, Y) :- planeja([(X,Y)]), executa_plano.
+executa_plano :- proxima_acao_plano(A), !, executa(A), executa_plano.
+executa_plano.
 
 %Quando posicao é visitada, atualiza memoria de posicao com a informação real do mapa 
 set_real(X,Y):- ((retract(certeza(X,Y)), assert(certeza(X,Y)),!); assert(certeza(X,Y))), set_real2(X,Y),
