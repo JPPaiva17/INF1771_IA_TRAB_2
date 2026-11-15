@@ -20,6 +20,7 @@
 :-dynamic pisou/2.
 :-dynamic perigo_confirmado/3.
 :-dynamic plano/2.
+:-dynamic arriscou/3.
 
 %arquivos de mapa sem caminho absoluto são procurados na pasta deste arquivo
 :- prolog_load_context(directory, D), retractall(diretorio_base(_)), assert(diretorio_base(D)).
@@ -47,6 +48,7 @@ reset_game :- retractall(memory(_,_,_)),
 			retractall(pisou(_,_)),
 			retractall(perigo_confirmado(_,_,_)),
 			retractall(plano(_,_)),
+			retractall(arriscou(_,_,_)),
 			assert(energia(100)),
 			assert(pontuacao(0)),
 			assert(ouros_coletados(0)),
@@ -360,7 +362,7 @@ estado_atual(e(X,Y,D)) :- posicao(X,Y,D), D \= morto.
 %(útil para arriscar uma casa de propósito). Falha se não houver caminho conhecido.
 rota_ate(Alvos, Acoes) :- estado_atual(E), rota_de(E, Alvos, Acoes).
 
-rota_de(e(X,Y,_), Alvos, []) :- memberchk((X,Y), Alvos), !.
+rota_de(E, Alvos, []) :- atinge(E, Alvos), !.
 rota_de(E, Alvos, Acoes) :-
 	E = e(X0,Y0,_),
 	empty_assoc(V0), put_assoc(E, V0, t, V),
@@ -373,14 +375,20 @@ bfs(Camada, Vistos, Alvos, Origem, Rev) :-
 	findall(E2-[A|R],
 	        ( member(E-R, Camada), efeito(E, A, E2), A \== pegar, transitavel(E2, Alvos, Origem) ),
 	        Candidatos),
-	( member(e(X,Y,_)-Rev, Candidatos), memberchk((X,Y), Alvos) -> true
+	( member(E2-Rev, Candidatos), atinge(E2, Alvos) -> true
 	; novos(Candidatos, Vistos, Proxima, Vistos2),
 	  bfs(Proxima, Vistos2, Alvos, Origem, Rev) ).
 
-%só pode entrar em casa segura ou na casa-alvo; na casa de origem pode girar mesmo que
+%um alvo é uma casa (X,Y) ou um estado e(X,Y,D) (entrar na casa olhando para D)
+atinge(e(X,Y,D), Alvos) :- ( memberchk((X,Y), Alvos) -> true ; memberchk(e(X,Y,D), Alvos) ).
+
+%só pode entrar em casa segura ou no alvo; na casa de origem pode girar mesmo que
 %ela não seja segura (ex.: o agente está na casa de um inimigo)
-transitavel(e(X,Y,_), Alvos, Origem) :-
-	( memberchk((X,Y), Alvos) -> true ; (X,Y) == Origem -> true ; segura(X,Y) ).
+transitavel(E, Alvos, Origem) :- E = e(X,Y,_),
+	( atinge(E, Alvos) -> true
+	; memberchk(e(X,Y,_), Alvos) -> fail          % casa-alvo, mas na direção errada
+	; (X,Y) == Origem -> true
+	; segura(X,Y) ).
 
 %descarta estados já vistos (mantém o primeiro caminho encontrado para cada estado)
 novos([], V, [], V).
@@ -489,15 +497,176 @@ show_mem(_,0) :- energia(E), pontuacao(P), write('E: '), write(E), write('   P: 
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Decisão: executa_acao(-Acao)
+%%
+%% Regras em ordem de prioridade: a primeira que se aplica decide, e todas
+%% terminam com corte (o Python pede todas as soluções e usa a primeira).
+%% Usa só a base de conhecimento do agente (nunca tile/3, adjacentes/1 ou
+%% observacoes/1). Só devolve a ação; quem executa é executa/1.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-%apagar esta linha - apenas para demonstracao aleatoria
-executa_acao(X) :- L=['virar_esquerda','virar_direita','andar','pegar'],random_between(1,4,I), nth1(I, L, X),!.
+%%% Parâmetros da estratégia %%%
+:- dynamic total_ouros/1, valor_ouro/1, voltar_ao_inicio/1, fator_ganho/1, limite_acoes/1, peso_teleporte/1.
+total_ouros(3).          % regra do jogo: 3 ouros por mapa
+valor_ouro(495).         % +500 do ouro − 5 do pegar
+voltar_ao_inicio(sim).   % sim: volta a (1,1) e sai; nao: para onde estiver
+fator_ganho(0.5).        % arrisca se o custo esperado ≤ fator × valor dos ouros que faltam
+limite_acoes(1500).      % trava de segurança contra laços
+peso_teleporte(16).      % multiplica o custo estimado do teletransportador: nos testes, o sorteio
+                         % de posição foi bem pior que a estimativa, então ele fica como último recurso
 
-%apagar linhas abaixo... sao exemplos de resposta
-%executa_acao(andar) :- posicao(PX, _, oeste), PX > 1, X = andar,!.
-%executa_acao(andar) :- posicao(PX, _, leste), PX < 3, X = andar,!.
-%executa_acao(pegar) :- posicao(PX, PY,_), tem_ouro(PX, PY), !.
-%executa_acao(voltar) :- peguei_todos_ouros,!.
+ouros_faltando(F) :- total_ouros(T), ouros_coletados(N), F is max(0, T - N).
+
+executa_acao(_) :- jogo_encerrado(_), !, fail.                           % 1. morto ou encerrado
+executa_acao(A) :- inimigo_aqui, foge(A), !.                            % 1b. sai da casa do inimigo
+executa_acao(pegar) :- brilho_aqui, !.                                   % 2. ouro aqui
+executa_acao(pegar) :- reflexo_aqui, vale_pegar_item, !.                 % 3. item de energia aqui
+executa_acao(A) :- tem_plano, proxima_acao_plano(A), !.                  % 4. plano em andamento
+executa_acao(A) :- ouros_faltando(0), !, encerra(A).                     % 5. tem os 3 ouros
+executa_acao(A) :- acoes_executadas(N), limite_acoes(L), N >= L, !, encerra(A).
+executa_acao(A) :- explora(A), !.                                        % 6. fronteira segura
+executa_acao(A) :- busca_item(A), !.                                     % 7a. recarrega antes de arriscar
+executa_acao(A) :- arrisca(A), !.                                        % 7b. casa de menor risco
+executa_acao(A) :- encerra(A), !.                                        % 7c. não compensa arriscar
+executa_acao(A) :- acao_aleatoria(A).                                    % 8. último recurso
+
+%%% 1b. Casa de inimigo: cada ação feita ali leva outro golpe, então sai com o mínimo de ações %%%
+inimigo_aqui :- posicao(X,Y,_), pisou(X,Y), memory(X,Y,L), memberchk(passos, L), !.
+foge(andar) :- posicao(X,Y,D), a_frente(X,Y,D,X2,Y2), segura(X2,Y2), !.
+foge(A) :- posicao(X,Y,_), findall((VX,VY), (vizinha(X,Y,VX,VY), segura(VX,VY)), L), L \== [],
+	rota_ate(L, [A|_]), !.
+
+%%% 3. Item de energia %%%
+%o agente esteve na casa e viu reflexo (o item continua lá até ser pego)
+item_conhecido(X,Y) :- pisou(X,Y), memory(X,Y,L), memberchk(reflexo, L).
+reflexo_aqui :- posicao(X,Y,_), item_conhecido(X,Y), !.
+
+%com energia ≤ 50 o item rende os +50 inteiros; com ≤ 80 vale se o agente vai precisar arriscar
+vale_pegar_item :- energia(E), E =< 50, !.
+vale_pegar_item :- energia(E), E =< 80, \+ fronteira(_,_), !.
+
+%%% 6. Exploração segura %%%
+explora(A) :- findall((X,Y), fronteira(X,Y), F), F \== [], planeja(F), proxima_acao_plano(A).
+
+%%% 7a. Buscar um item conhecido antes de arriscar (inimigo tira até 80 de energia) %%%
+busca_item(A) :- energia(E), E =< 80,
+	findall((X,Y), item_conhecido(X,Y), Itens), Itens \== [],
+	planeja(Itens), proxima_acao_plano(A).
+
+%%% 7b. Arriscar %%%
+%candidatas: casas não pisadas, ainda não seguras, sem poço provado e vizinhas de uma casa
+%segura (ou da posição atual); e teletransportadores já conhecidos, como forma de sair
+%de uma região sem saída. Só valem se houver rota segura até a vizinha (rota_ate decide).
+candidata_risco(X,Y) :- dentro_mapa(X,Y), \+ pisou(X,Y), \+ segura(X,Y),
+	\+ perigo_confirmado(X,Y,poco),
+	once(( vizinha(X,Y,VX,VY), ( segura(VX,VY) ; posicao(VX,VY,_) ) )).
+candidata_risco(X,Y) :- pisou(X,Y), perigo_confirmado(X,Y,teleporte).
+
+%prob_perigo(+X,+Y,+P,-Prob): estimativa da chance de o perigo P estar em (X,Y)
+prob_perigo(X,Y,P,1) :- perigo_confirmado(X,Y,P), !.
+prob_perigo(X,Y,P,0) :- \+ pode_ter(X,Y,P), !.
+prob_perigo(X,Y,P,Prob) :- sinal(P,S),
+	findall(Pv, ( vizinha(X,Y,VX,VY), percepcao(VX,VY,L), memberchk(S,L),
+	              prob_pela_vizinha(VX,VY,X,Y,P,Pv) ), Ps),
+	( Ps == [] -> prob_a_priori(P, Prob) ; max_list(Ps, Prob) ).
+
+%uma casa que sentiu o sinal "divide" a culpa entre as vizinhas que ainda podem ter o perigo;
+%se o sinal já está explicado por um perigo provado em outra vizinha, a chance é pequena
+prob_pela_vizinha(VX,VY,X,Y,P,Pv) :-
+	( vizinha(VX,VY,NX,NY), (NX,NY) \== (X,Y), perigo_confirmado(NX,NY,P) -> Pv = 0.15
+	; aggregate_all(count, (vizinha(VX,VY,NX,NY), pode_ter(NX,NY,P)), K), Pv is 1 / K ).
+
+%casa sem nenhuma informação: proporção do elemento no mapa (8 P, 4 T, 4 inimigos em 144)
+prob_a_priori(poco, P) :- P is 8 / 144.
+prob_a_priori(teleporte, P) :- P is 4 / 144.
+prob_a_priori(inimigo, P) :- P is 4 / 144.
+
+%entrada_risco(-Alvo, -Custo): uma forma de entrar numa candidata e a perda esperada.
+%Se pode haver inimigo, o alvo inclui a direção de entrada: o inimigo golpeia a cada ação
+%feita na casa dele, então o melhor é entrar já de frente para uma saída segura.
+entrada_risco(Alvo, Custo) :- candidata_risco(X,Y),
+	( pode_ter(X,Y,inimigo) -> entrada_inimigo(X,Y,D,Golpes), Alvo = e(X,Y,D)
+	; Alvo = (X,Y), Golpes = 1 ),
+	custo_risco(X,Y,Golpes,Custo).
+
+%entrando em (X,Y) olhando para D (vindo da casa de trás, que é segura ou é a atual),
+%Golpes = ações feitas lá dentro: 1 se a casa à frente é segura, 2 se uma lateral é,
+%senão 3 (meia-volta para a casa de onde veio)
+entrada_inimigo(X,Y,D,Golpes) :- direita(D,_), oposta(D,DT),
+	a_frente(X,Y,DT,BX,BY), ( segura(BX,BY) ; posicao(BX,BY,_) ),
+	( a_frente(X,Y,D,FX,FY), segura(FX,FY) -> Golpes = 1
+	; ( direita(D,L) ; esquerda(D,L) ), a_frente(X,Y,L,LX,LY), segura(LX,LY) -> Golpes = 2
+	; Golpes = 3 ).
+
+oposta(D, O) :- direita(D, R), direita(R, O).
+
+%custo_risco(+X,+Y,+Golpes,-Custo): perda esperada de pontos ao entrar em (X,Y)
+%V = valor dos ouros que faltam (perdidos se o agente morrer)
+custo_risco(X,Y,Golpes,Custo) :-
+	ouros_faltando(F), valor_ouro(VO), V is F * VO, energia(E),
+	findall(C, ( perigo(P), prob_perigo(X,Y,P,Pr), Pr > 0,
+	             custo_perigo(P,X,Y,V,E,Golpes,CP), C is Pr * CP ), Cs),
+	sum_list(Cs, Custo).
+
+custo_perigo(poco, _, _, V, _, _, C) :- C is 1000 + V.
+%teletransporte: chance de cair num poço (8 em 144) + desvio; fica mais caro a cada uso
+custo_perigo(teleporte, _, _, V, _, _, C) :- usos_teleporte(N), peso_teleporte(W),
+	C is W * (8/144 * (1000 + V) + 20) * (1 + N).
+%inimigo: chance de morrer com aqueles golpes + energia perdida
+custo_perigo(inimigo, _, _, V, E, G, C) :- prob_morte_inimigo(E, G, PM), C is PM * V + 10 * G.
+
+%quantas vezes o agente já entrou de propósito num teletransportador conhecido (todos somados)
+usos_teleporte(N) :- aggregate_all(sum(K), arriscou(_,_,K), N).
+
+%prob_morte_inimigo(+E,+Golpes,-P): chance de morrer levando Golpes golpes com energia E
+%(d e D são indistinguíveis: metade de chance cada; D tira 50..80, d tira 25..50)
+prob_morte_inimigo(E, G, P) :-
+	prob_soma_atinge(G, 50, 80, E, PD), prob_soma_atinge(G, 25, 50, E, Pd),
+	P is (PD + Pd) / 2.
+
+%chance de a soma de K danos sorteados em Min..Max chegar a E
+:- table prob_soma_atinge/5.
+prob_soma_atinge(_, _, _, E, 1) :- E =< 0, !.
+prob_soma_atinge(0, _, _, _, 0) :- !.
+prob_soma_atinge(K, Min, Max, E, P) :- K1 is K - 1,
+	aggregate_all(sum(P1), ( between(Min, Max, Dano), E1 is E - Dano,
+	                         prob_soma_atinge(K1, Min, Max, E1, P1) ), S),
+	P is S / (Max - Min + 1).
+
+%só arrisca se a perda esperada for menor que uma fração do que ainda dá para ganhar
+aceita_risco(Custo) :- ouros_faltando(F), F > 0, valor_ouro(VO), fator_ganho(G), Custo =< G * F * VO.
+
+%ordena as candidatas pelo risco; entre as de risco parecido (±5) vai à mais próxima
+arrisca(A) :-
+	findall(C-Alvo, entrada_risco(Alvo, C), L0),
+	keysort(L0, L),
+	escolhe_risco(L, A).
+
+escolhe_risco([C|_], _) :- C = Custo-_, \+ aceita_risco(Custo), !, fail.
+escolhe_risco(L, A) :-
+	L = [C0-_|_], Lim is C0 + 5,
+	partition([C-_]>>(C =< Lim), L, Grupo0, Resto),
+	pairs_values(Grupo0, Grupo),
+	( planeja(Grupo) -> registra_risco, proxima_acao_plano(A)
+	; escolhe_risco(Resto, A) ).
+
+%anota o uso de um teletransportador conhecido (para não usá-lo em laço)
+registra_risco :- plano(Acoes, E), destino(E, Acoes, e(X,Y,_)),
+	( pisou(X,Y), perigo_confirmado(X,Y,teleporte) ->
+		( arriscou(X,Y,N) -> true ; N = 0 ), N1 is N + 1,
+		retractall(arriscou(X,Y,_)), assert(arriscou(X,Y,N1))
+	; true ), !.
+
+destino(E, [], E).
+destino(E, [A|R], F) :- once(efeito(E, A, E1)), destino(E1, R, F).
+
+%%% 5 e 7c. Encerrar: volta a (1,1) por casas seguras e sai; sem rota, para onde está %%%
+encerra(sair) :- voltar_ao_inicio(sim), posicao(1,1,_), !.
+encerra(A) :- voltar_ao_inicio(sim), planeja([(1,1)]), proxima_acao_plano(A), !.
+encerra(parar).
+
+%%% 8. Último recurso (sugestão do professor); na prática encerra/1 sempre decide antes
+acao_aleatoria(X) :- L = [virar_esquerda, virar_direita, andar, pegar], random_member(X, L).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 

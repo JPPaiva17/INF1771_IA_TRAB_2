@@ -188,3 +188,81 @@ test(plano_cancelado_por_teleporte, [forall(between(1, 10, _))]) :-
 	executa(andar), \+ tem_plano.
 
 :- end_tests(fase3).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Fase 4: política de decisão executa_acao/1
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% joga com a política até o fim (ou até K ações)
+joga_politica(0) :- !.
+joga_politica(_) :- jogo_encerrado(_), !.
+joga_politica(K) :- executa_acao(A), executa(A), K1 is K - 1, joga_politica(K1).
+
+% o agente pisa em (X,Y) e percebe o que há ali (para montar situações)
+pisa(X, Y, D) :- coloca(X, Y, D), set_real(X, Y), atualiza_obs.
+
+define_energia(E) :- retractall(energia(_)), assert(energia(E)).
+define_ouros(N) :- retractall(ouros_coletados(_)), assert(ouros_coletados(N)).
+
+% a decisão é determinística: uma única resposta (o Python usa a primeira de todas)
+uma_decisao(A) :- findall(X, executa_acao(X), [A]).
+
+:- begin_tests(fase4).
+
+test(pega_ouro) :-
+	carrega_mapa('testes/mapa_teste_itens.pl'), pisa(3,1,norte), uma_decisao(pegar).
+
+test(item_so_com_pouca_energia) :-
+	carrega_mapa('testes/mapa_teste_itens.pl'), pisa(1,3,norte),
+	uma_decisao(A), A \== pegar,
+	define_energia(40), uma_decisao(pegar).
+
+test(explora_fronteira_segura) :-
+	carrega_mapa('testes/mapa_teste_poco.pl'), uma_decisao(A),
+	memberchk(A, [andar, virar_direita]), tem_plano.
+
+% mapa sem ouro: explora tudo o que é seguro, não arrisca o poço 50/50, volta e sai
+test(partida_poco_sobrevive_e_sai) :-
+	carrega_mapa('testes/mapa_teste_poco.pl'), joga_politica(200),
+	jogo_encerrado(saiu), resultado(_, _, 0, sim, _, saiu),
+	forall(dentro_mapa(X,Y), ( (X,Y) == (1,3) -> \+ pisou(X,Y) ; pisou(X,Y) )).
+
+% pega o ouro, explora o resto, volta a (1,1) e sai
+test(partida_itens_pega_ouro) :-
+	carrega_mapa('testes/mapa_teste_itens.pl'), joga_politica(200),
+	resultado(_, P, 1, sim, _, saiu), P > 450, \+ tile(3,1,'O'), once(tile(1,3,'U')).
+
+% com os 3 ouros: planeja a volta; em (1,1) sai
+test(tres_ouros_volta_e_sai) :-
+	carrega_mapa('testes/mapa_teste_poco.pl'), conhece_mapa, define_ouros(3),
+	coloca(3,3,sul), uma_decisao(_), tem_plano,
+	executa_plano, posicao(1,1,_), uma_decisao(sair).
+
+% risco 50/50 de poço não compensa (arrisca/1 só é chamado quando não há fronteira)
+test(nao_arrisca_poco_meio_a_meio) :-
+	carrega_mapa('testes/mapa_teste_poco.pl'), executa(andar),
+	once(entrada_risco((1,3), C1)), once(entrada_risco((2,2), C2)),
+	C1 > 1000, C2 > 1000, \+ aceita_risco(C1).
+
+% na casa do inimigo: anda em frente se a frente é segura; contra a parede, vira uma vez só
+test(foge_do_inimigo) :-
+	carrega_mapa('testes/mapa_teste_cadeia.pl'), conhece_mapa,
+	pisa(2,3,leste), inimigo_aqui, uma_decisao(andar),
+	coloca(2,3,sul), uma_decisao(andar),
+	coloca(2,3,norte), uma_decisao(A), memberchk(A, [virar_direita, virar_esquerda]).
+
+% chance de morrer na casa de um inimigo, pelo número de golpes
+test(prob_morte_inimigo) :-
+	prob_morte_inimigo(100, 1, P1), P1 =:= 0,
+	prob_morte_inimigo(81, 1, P2), P2 =:= 0,
+	prob_morte_inimigo(80, 1, P3), P3 > 0, P3 < 0.05,
+	prob_morte_inimigo(100, 2, P4), P4 > 0.5,
+	prob_morte_inimigo(25, 1, P5), P5 =:= 1.
+
+% entrar no inimigo de frente para uma saída segura custa 1 golpe; sem saída, mais
+test(entrada_alinhada_com_saida) :-
+	carrega_mapa('testes/mapa_teste_cadeia.pl'), conhece_mapa,
+	retract(user:perigo_confirmado(2,3,inimigo)), sincroniza_memoria,
+	entrada_inimigo(2,3,leste,1), entrada_inimigo(2,3,norte,G), G > 1, !.
+
+:- end_tests(fase4).

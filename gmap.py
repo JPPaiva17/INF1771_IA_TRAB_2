@@ -10,12 +10,15 @@ import pathlib
 current_path = pathlib.Path(__file__).resolve().parent
 os.chdir(current_path)
 
-# mapa escolhido pela linha de comando: python gmap.py mapa-dificil.pl
-mapa_arquivo = sys.argv[1] if len(sys.argv) > 1 else 'mapa.pl'
+# linha de comando: python gmap.py [mapa] [--auto]
+#   mapa:   arquivo de mapa da pasta (padrão mapa.pl), ex.: mapa-dificil.pl
+#   --auto: liga o autoplay (o agente Prolog joga sozinho)
+argumentos = [a for a in sys.argv[1:] if not a.startswith('--')]
+mapa_arquivo = argumentos[0] if argumentos else 'mapa.pl'
 
 elapsed_time = 0
 auto_play_tempo = 0.5
-auto_play = False # desligar para controlar manualmente
+auto_play = '--auto' in sys.argv  # False: controle manual pelo teclado
 show_map = False
 
 scale = 60
